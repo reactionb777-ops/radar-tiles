@@ -60,11 +60,12 @@ const st = document.getElementById('st');
 const followBtn = document.getElementById('follow');
 const params = new URLSearchParams(location.search);
 const key = params.get('k') || '';
-// Link from the menu opens this page on GitHub Pages with only ?k=. The game posts
-// the current tunnel origin to ntfy topic 'cr' + k. Opened on the tunnel itself,
-// the stream is same-origin.
+// The menu link is the tunnel itself (https://xxxx.lhr.life/?k=). Free tunnel hosts
+// rotate; the game posts each new origin to ntfy topic 'cr' + k, and an open tab
+// follows it to the new address. The same page on GitHub Pages (?k=) streams
+// from whatever origin ntfy holds.
 const onPages = location.hostname.endsWith('github.io');
-const topic = onPages && key ? 'cr' + key : '';
+const topic = key ? 'cr' + key : '';
 let host = '';
 let W = 1, H = 1, dpr = 1, scale = 0.1, camX = 0, camY = 0, follow = true, haveFix = false;
 let dots = [], me = null, dirty = true;
@@ -274,11 +275,18 @@ function connect() {
   es.onmessage = function (ev) { lastMsg = Date.now(); try { apply(JSON.parse(ev.data)); } catch (e) {} };
   es.onerror = function () { st.textContent = 'reconnecting'; };
 }
+let firstTry = true;
 async function reconnect() {
   if (finding) return;
+  // On the tunnel the first try is always this origin; ntfy is only asked once it went quiet.
+  if (!onPages && firstTry) { firstTry = false; connect(); return; }
   finding = true;
-  if (onPages) host = await latestHost();
+  host = await latestHost();
   finding = false;
+  if (!onPages && host && host !== location.origin) {
+    location.replace(host + '/?k=' + encodeURIComponent(key));
+    return;
+  }
   connect();
 }
 function openStream() {
