@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:,">
+<title>Cloud radar</title>
+<style>
+html,body{margin:0;height:100%;background:#102838;overflow:hidden}
+#view{display:block;width:100%;height:100%;touch-action:none}
+.bar{position:absolute;z-index:5;top:12px;left:12px;display:flex;gap:10px;align-items:center;
+background:#121212;border:1px solid #3a3a3a;border-radius:4px;padding:8px 10px;
+font:13px/1 "Segoe UI",sans-serif;color:#fff}
+.bar button{background:#1c1c1c;color:#fff;border:1px solid #3a3a3a;border-radius:4px;padding:4px 8px;cursor:pointer}
+.bar button.on{background:#fff;color:#111}
+.sw{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:4px;vertical-align:0}
+.xy{color:#9a9a9a}
+</style>
+</head>
+<body>
+<canvas id="view"></canvas>
+<div class="bar">
+<span>Cloud radar</span>
+<span><i class="sw" style="background:#ff3232"></i><span id="np">0</span></span>
+<span><i class="sw" style="background:#c8c8c8"></i><span id="nc">0</span></span>
+<button id="follow" class="on" type="button">Follow</button>
+<span class="xy" id="xy"></span>
+<span id="st">loading map</span>
+</div>
+<script>
+const MAP_MINX = -3428.616, MAP_MINY = -3599.996, MAP_MAXX = 4197.001, MAP_MAXY = 7695.672;
+const TILE_URL = 'https://reactionb777-ops.github.io/radar-tiles/';
+const TILE_ORGX = -3456, TILE_ORGY = 7712, TILE_WORLD = 12288, TILE_MAXZ = 8, TILE_BASEZ = 3;
+const MAX_SCALE = 12;
+const RANGE_M = 300; // soft red ring around you, metres
+const canvas = document.getElementById('view');
+const ctx = canvas.getContext('2d');
+const tiles = new Map();
+let tileTick = 0;
+// Heavy sniper icons: white silhouettes, tinted like the ESP (Mk II red, Mk I orange).
+function tinted(src, color) {
+  const out = { c: null };
+  const img = new Image();
+  img.onload = function () {
+    const c = document.createElement('canvas');
+    c.width = img.naturalWidth; c.height = img.naturalHeight;
+    const g = c.getContext('2d');
+    g.drawImage(img, 0, 0);
+    g.globalCompositeOperation = 'source-in';
+    g.fillStyle = color;
+    g.fillRect(0, 0, c.width, c.height);
+    out.c = c;
+    dirty = true;
+  };
+  img.src = src;
+  return out;
+}
+const HEAVY = [null, tinted('data:image/png;base64,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', '#ff8c00'), tinted('data:image/png;base64,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', '#ff1e1e')];
+const st = document.getElementById('st');
+const followBtn = document.getElementById('follow');
+const params = new URLSearchParams(location.search);
+const key = params.get('k') || '';
+// Link from the menu opens this page on GitHub Pages: t = ntfy topic with the
+// current tunnel origin, h = origin at copy time. Opened on the tunnel itself,
+// the stream is same-origin.
+const topic = params.get('t') || '';
+const onPages = location.hostname.endsWith('github.io');
+let host = params.get('h') || '';
+let W = 1, H = 1, dpr = 1, scale = 0.1, camX = 0, camY = 0, follow = true, haveFix = false;
+let dots = [], me = null, dirty = true;
+function fitScale() {
+  return Math.min((W * 0.94) / (MAP_MAXX - MAP_MINX), (H * 0.94) / (MAP_MAXY - MAP_MINY));
+}
+function minScale() { return fitScale() * 0.5; }
+function resize() {
+  dpr = window.devicePixelRatio || 1;
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = Math.round(W * dpr); canvas.height = Math.round(H * dpr);
+  dirty = true;
+}
+window.addEventListener('resize', resize);
+resize();
+camX = (MAP_MINX + MAP_MAXX) * 0.5;
+camY = (MAP_MINY + MAP_MAXY) * 0.5;
+scale = fitScale();
+function onMap(x, y) { return x >= MAP_MINX && x <= MAP_MAXX && y >= MAP_MINY && y <= MAP_MAXY; }
+function w2s(x, y) { return [(x - camX) * scale + W * 0.5, (camY - y) * scale + H * 0.5]; }
+function tile(z, x, y, want) {
+  const id = z + '/' + x + '/' + y;
+  let t = tiles.get(id);
+  if (!t && want) {
+    t = { img: new Image(), ok: false, bad: false, used: 0 };
+    t.img.onload = function () { t.ok = true; dirty = true; };
+    t.img.onerror = function () { t.bad = true; };
+    t.img.src = TILE_URL + id + '.webp';
+    tiles.set(id, t);
+  }
+  if (t) t.used = tileTick;
+  return t;
+}
+function dropOldTiles() {
+  if (tiles.size < 700) return;
+  const old = [];
+  tiles.forEach(function (t, id) { if (t.used < tileTick - 2) old.push([t.used, id]); });
+  old.sort(function (a, b) { return a[0] - b[0]; });
+  for (let i = 0; i < old.length && tiles.size > 500; i++) tiles.delete(old[i][1]);
+}
+// Draws level z over the view. want=false only paints tiles that are already in.
+function drawLevel(z, want) {
+  const n = 1 << z, ts = TILE_WORLD / n;
+  const hw = W * 0.5 / scale, hh = H * 0.5 / scale;
+  const x0 = Math.max(camX - hw, MAP_MINX), x1 = Math.min(camX + hw, MAP_MAXX);
+  const y0 = Math.max(camY - hh, MAP_MINY), y1 = Math.min(camY + hh, MAP_MAXY);
+  if (x0 >= x1 || y0 >= y1) return;
+  const tx0 = Math.max(0, Math.floor((x0 - TILE_ORGX) / ts)), tx1 = Math.min(n - 1, Math.floor((x1 - TILE_ORGX) / ts));
+  const ty0 = Math.max(0, Math.floor((TILE_ORGY - y1) / ts)), ty1 = Math.min(n - 1, Math.floor((TILE_ORGY - y0) / ts));
+  for (let ty = ty0; ty <= ty1; ty++) {
+    for (let tx = tx0; tx <= tx1; tx++) {
+      const t = tile(z, tx, ty, want);
+      if (!t || !t.ok) continue;
+      // Whole-pixel edges, so neighbours meet without hairlines.
+      const p = w2s(TILE_ORGX + tx * ts, TILE_ORGY - ty * ts);
+      const q = w2s(TILE_ORGX + (tx + 1) * ts, TILE_ORGY - (ty + 1) * ts);
+      const ax = Math.round(p[0] * dpr) / dpr, ay = Math.round(p[1] * dpr) / dpr;
+      const bx = Math.round(q[0] * dpr) / dpr, by = Math.round(q[1] * dpr) / dpr;
+      ctx.drawImage(t.img, ax, ay, bx - ax, by - ay);
+    }
+  }
+}
+function drawMap() {
+  tileTick++;
+  const z = Math.max(0, Math.min(TILE_MAXZ, Math.ceil(Math.log2(scale * dpr * TILE_WORLD / 256))));
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  // Coarse base first, then any finer level already cached, then the sharp one.
+  const base = Math.min(z, TILE_BASEZ);
+  drawLevel(base, true);
+  for (let lz = base + 1; lz < z; lz++) drawLevel(lz, false);
+  if (z > base) drawLevel(z, true);
+  dropOldTiles();
+}
+function draw() {
+  if (dirty) {
+    dirty = false;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.fillStyle = '#102838';
+    ctx.fillRect(0, 0, W, H);
+    drawMap();
+    // Dots grow a little as you zoom in: x1 when the island fits, up to x2.6.
+    const f = Math.max(1, Math.min(2.6, 1 + Math.log2(scale / 0.5) * 0.35));
+    if (me) {
+      const p = w2s(me.x, me.y);
+      ctx.beginPath();
+      ctx.arc(p[0], p[1], RANGE_M * scale, 0, 6.2832);
+      ctx.fillStyle = 'rgba(255,90,90,0.07)';
+      ctx.fill();
+      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = 'rgba(255,120,120,0.55)';
+      ctx.stroke();
+    }
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = '#111';
+    for (let i = 0; i < dots.length; i++) {
+      const d = dots[i], n = d.k === 'n';
+      const p = w2s(d.x, d.y);
+      if (p[0] < -60 || p[1] < -20 || p[0] > W + 60 || p[1] > H + 60) continue;
+      const r = (n ? 3.5 : 5) * f;
+      ctx.beginPath();
+      ctx.fillStyle = n ? '#c8c8c8' : '#ff3232';
+      ctx.arc(p[0], p[1], r, 0, 6.2832);
+      ctx.fill();
+      ctx.stroke();
+      const icon = HEAVY[d.w | 0];
+      if (icon && icon.c) {
+        const iw = 34 * f, ih = iw * icon.c.height / icon.c.width;
+        ctx.save();
+        ctx.shadowColor = '#000';
+        ctx.shadowBlur = 3;
+        ctx.drawImage(icon.c, p[0] - iw * 0.5, p[1] + r + 2, iw, ih);
+        ctx.restore();
+      }
+    }
+    if (me) {
+      const p = w2s(me.x, me.y);
+      ctx.save();
+      ctx.translate(p[0], p[1]);
+      ctx.scale(f, f);
+      ctx.rotate((me.h || 0) * 0.0174533);
+      ctx.beginPath();
+      ctx.moveTo(0, -7); ctx.lineTo(4.5, 5); ctx.lineTo(0, 2.5); ctx.lineTo(-4.5, 5); ctx.closePath();
+      ctx.fillStyle = '#fff';
+      ctx.fill();
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = '#000';
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+  requestAnimationFrame(draw);
+}
+function setFollow(on) {
+  follow = on;
+  followBtn.classList.toggle('on', on);
+  if (on && me && onMap(me.x, me.y)) { camX = me.x; camY = me.y; dirty = true; }
+}
+followBtn.onclick = function () { setFollow(!follow); };
+let dragging = false, lx = 0, ly = 0;
+canvas.addEventListener('pointerdown', function (e) {
+  dragging = true;
+  setFollow(false);
+  lx = e.clientX; ly = e.clientY;
+  canvas.setPointerCapture(e.pointerId);
+});
+canvas.addEventListener('pointermove', function (e) {
+  if (!dragging) return;
+  camX -= (e.clientX - lx) / scale;
+  camY += (e.clientY - ly) / scale;
+  lx = e.clientX; ly = e.clientY;
+  dirty = true;
+});
+canvas.addEventListener('pointerup', function () { dragging = false; });
+canvas.addEventListener('wheel', function (e) {
+  e.preventDefault();
+  const rect = canvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+  const wx = camX + (mx - W * 0.5) / scale;
+  const wy = camY - (my - H * 0.5) / scale;
+  scale = Math.max(minScale(), Math.min(MAX_SCALE, scale * Math.exp(-e.deltaY * 0.0015)));
+  if (!(follow && me && onMap(me.x, me.y))) {
+    camX = wx - (mx - W * 0.5) / scale;
+    camY = wy + (my - H * 0.5) / scale;
+  }
+  dirty = true;
+}, { passive: false });
+function apply(j) {
+  let np = 0, nc = 0;
+  dots = j.blips || [];
+  for (let i = 0; i < dots.length; i++) { if (dots[i].k === 'n') nc++; else np++; }
+  document.getElementById('np').textContent = String(np);
+  document.getElementById('nc').textContent = String(nc);
+  me = j.ok && j.me ? j.me : null;
+  if (me) {
+    document.getElementById('xy').textContent = me.x.toFixed(1) + '   ' + me.y.toFixed(1);
+    if (onMap(me.x, me.y)) {
+      if (!haveFix) { haveFix = true; scale = Math.max(scale, 1); }
+      if (follow) { camX = me.x; camY = me.y; }
+    }
+  }
+  st.textContent = j.ok ? 'live' : 'waiting';
+  dirty = true;
+}
+let es = null, lastMsg = 0, finding = false;
+// Free tunnel hosts rotate. The game posts every new origin to ntfy; take the newest.
+async function latestHost() {
+  if (!topic) return host;
+  try {
+    const r = await fetch('https://ntfy.sh/' + encodeURIComponent(topic) + '/json?poll=1&since=all', { cache: 'no-store' });
+    const lines = (await r.text()).trim().split('\n');
+    for (let i = lines.length - 1; i >= 0; i--) {
+      try {
+        const m = JSON.parse(lines[i]);
+        if (m.event === 'message' && /^https:\/\/[a-z0-9.-]+$/i.test(m.message)) return m.message;
+      } catch (e) {}
+    }
+  } catch (e) {}
+  return host;
+}
+function connect() {
+  if (es) es.close();
+  lastMsg = Date.now();
+  if (onPages && !host) { st.textContent = 'offline'; return; }
+  st.textContent = 'connecting';
+  es = new EventSource((onPages ? host : '') + '/api/stream?k=' + encodeURIComponent(key));
+  es.onmessage = function (ev) { lastMsg = Date.now(); try { apply(JSON.parse(ev.data)); } catch (e) {} };
+  es.onerror = function () { st.textContent = 'reconnecting'; };
+}
+async function reconnect() {
+  if (finding) return;
+  finding = true;
+  if (onPages) host = await latestHost();
+  finding = false;
+  connect();
+}
+function openStream() {
+  dirty = true;
+  if (!key) { st.textContent = 'no link'; return; }
+  reconnect();
+  // Snapshots arrive ~10 times a second, so 6 s of silence means the tunnel moved.
+  setInterval(function () { if (Date.now() - lastMsg > 6000) reconnect(); }, 2000);
+}
+// The tunnel keeps one lane per viewer: start the stream only after the page is in.
+if (document.readyState === 'complete') openStream();
+else window.addEventListener('load', openStream);
+requestAnimationFrame(draw);
+</script>
+</body>
+</html>
