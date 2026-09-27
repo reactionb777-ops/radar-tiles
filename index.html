@@ -233,13 +233,19 @@ canvas.addEventListener('wheel', function (e) {
   }
   dirty = true;
 }, { passive: false });
+// Snapshot: {ok, me:[x,y,heading], p:[x,y,w, ...] players, n:[x,y,w, ...] NPCs}.
+function unpack(arr, kind, out) {
+  for (let i = 0; i + 2 < arr.length; i += 3) out.push({ x: arr[i], y: arr[i + 1], w: arr[i + 2], k: kind });
+}
 function apply(j) {
-  let np = 0, nc = 0;
-  dots = j.blips || [];
-  for (let i = 0; i < dots.length; i++) { if (dots[i].k === 'n') nc++; else np++; }
-  document.getElementById('np').textContent = String(np);
-  document.getElementById('nc').textContent = String(nc);
-  me = j.ok && j.me ? j.me : null;
+  const p = j.p || [], n = j.n || [];
+  const list = [];
+  unpack(p, 'p', list);
+  unpack(n, 'n', list);
+  dots = list;
+  document.getElementById('np').textContent = String(p.length / 3);
+  document.getElementById('nc').textContent = String(n.length / 3);
+  me = j.ok && j.me ? { x: j.me[0], y: j.me[1], h: j.me[2] } : null;
   if (me) {
     document.getElementById('xy').textContent = me.x.toFixed(1) + '   ' + me.y.toFixed(1);
     if (onMap(me.x, me.y)) {
@@ -250,7 +256,7 @@ function apply(j) {
   st.textContent = j.ok ? 'live' : 'waiting';
   dirty = true;
 }
-let es = null, lastMsg = 0, finding = false;
+let es = null, lastMsg = 0, finding = false, lagBase = Infinity, openedAt = 0;
 // Free tunnel hosts rotate. The game posts every new origin to ntfy; take the newest.
 async function latestHost() {
   if (!topic) return host;
@@ -272,7 +278,19 @@ function connect() {
   if (onPages && !host) { st.textContent = 'offline'; return; }
   st.textContent = 'connecting';
   es = new EventSource((onPages ? host : '') + '/api/stream?k=' + encodeURIComponent(key));
-  es.onmessage = function (ev) { lastMsg = Date.now(); try { apply(JSON.parse(ev.data)); } catch (e) {} };
+  lagBase = Infinity;
+  openedAt = Date.now();
+  es.onmessage = function (ev) {
+    lastMsg = Date.now();
+    let j;
+    try { j = JSON.parse(ev.data); } catch (e) { return; }
+    // Clocks differ, so track the smallest (arrival - server time) seen on this stream.
+    // Frames 1.5 s behind that mean the tunnel is holding a queue: reopen to drop it.
+    const off = lastMsg - (j.t || 0);
+    if (off < lagBase) lagBase = off;
+    if (off - lagBase > 1500 && lastMsg - openedAt > 4000) { connect(); return; }
+    apply(j);
+  };
   es.onerror = function () { st.textContent = 'reconnecting'; };
 }
 let firstTry = true;
