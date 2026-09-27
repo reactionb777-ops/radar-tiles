@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="icon" href="data:,">
-<title>Cloud radar</title>
+<title>Map</title>
 <style>
 html,body{margin:0;height:100%;background:#102838;overflow:hidden}
 #view{display:block;width:100%;height:100%;touch-action:none}
@@ -20,9 +20,9 @@ font:13px/1 "Segoe UI",sans-serif;color:#fff}
 <body>
 <canvas id="view"></canvas>
 <div class="bar">
-<span>Cloud radar</span>
 <span><i class="sw" style="background:#ff3232"></i><span id="np">0</span></span>
 <span><i class="sw" style="background:#c8c8c8"></i><span id="nc">0</span></span>
+<span id="fr" style="display:none"><i class="sw" style="background:#3cdc3c"></i><span id="nf">0</span></span>
 <button id="follow" class="on" type="button">Follow</button>
 <span class="xy" id="xy"></span>
 <span id="st">loading map</span>
@@ -163,11 +163,12 @@ function draw() {
     ctx.strokeStyle = '#111';
     for (let i = 0; i < dots.length; i++) {
       const d = dots[i], n = d.k === 'n';
+      const col = n ? '#c8c8c8' : d.k === 'f' ? '#3cdc3c' : '#ff3232';
       const p = w2s(d.x, d.y);
       if (p[0] < -60 || p[1] < -20 || p[0] > W + 60 || p[1] > H + 60) continue;
       const r = (n ? 3.5 : 5) * f;
       ctx.beginPath();
-      ctx.fillStyle = n ? '#c8c8c8' : '#ff3232';
+      ctx.fillStyle = col;
       ctx.arc(p[0], p[1], r, 0, 6.2832);
       ctx.fill();
       ctx.stroke();
@@ -233,18 +234,21 @@ canvas.addEventListener('wheel', function (e) {
   }
   dirty = true;
 }, { passive: false });
-// Snapshot: {ok, me:[x,y,heading], p:[x,y,w, ...] players, n:[x,y,w, ...] NPCs}.
+// Snapshot: {t, ok, me:[x,y,heading], p/n/f:[x,y,w, ...] players, NPCs, friends}.
 function unpack(arr, kind, out) {
   for (let i = 0; i + 2 < arr.length; i += 3) out.push({ x: arr[i], y: arr[i + 1], w: arr[i + 2], k: kind });
 }
 function apply(j) {
-  const p = j.p || [], n = j.n || [];
+  const p = j.p || [], n = j.n || [], f = j.f || [];
   const list = [];
-  unpack(p, 'p', list);
   unpack(n, 'n', list);
+  unpack(f, 'f', list);
+  unpack(p, 'p', list);
   dots = list;
   document.getElementById('np').textContent = String(p.length / 3);
   document.getElementById('nc').textContent = String(n.length / 3);
+  document.getElementById('nf').textContent = String(f.length / 3);
+  document.getElementById('fr').style.display = f.length ? '' : 'none';
   me = j.ok && j.me ? { x: j.me[0], y: j.me[1], h: j.me[2] } : null;
   if (me) {
     document.getElementById('xy').textContent = me.x.toFixed(1) + '   ' + me.y.toFixed(1);
