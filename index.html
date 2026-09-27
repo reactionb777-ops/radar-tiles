@@ -64,9 +64,9 @@ const params = new URLSearchParams(location.search);
 const key = params.get('k') || '';
 // The menu link is the tunnel itself (https://xxxx.lhr.life/?k=). Free tunnel hosts
 // rotate; the game posts each new origin to ntfy topic 'cr' + k, and an open tab
-// follows it to the new address. The same page on GitHub Pages (?k=) streams
+// follows it to the new address. The same page on the tile host (?k=) streams
 // from whatever origin ntfy holds.
-const onPages = location.hostname.endsWith('github.io');
+const onPages = location.href.startsWith(TILE_URL);
 const topic = key ? 'cr' + key : '';
 let host = '';
 let W = 1, H = 1, dpr = 1, scale = 0.1, camX = 0, camY = 0, follow = true, haveFix = false;
@@ -110,20 +110,20 @@ function dropOldTiles() {
 }
 // Draws level z over the view. want=false only paints tiles that are already in.
 function drawLevel(z, want) {
-  const n = 1 << z, ts = TILE_WORLD / n;
+  const nb = 1 << z, bw = TILE_WORLD / nb;
   const hw = W * 0.5 / scale, hh = H * 0.5 / scale;
   const x0 = Math.max(camX - hw, MAP_MINX), x1 = Math.min(camX + hw, MAP_MAXX);
   const y0 = Math.max(camY - hh, MAP_MINY), y1 = Math.min(camY + hh, MAP_MAXY);
   if (x0 >= x1 || y0 >= y1) return;
-  const tx0 = Math.max(0, Math.floor((x0 - TILE_ORGX) / ts)), tx1 = Math.min(n - 1, Math.floor((x1 - TILE_ORGX) / ts));
-  const ty0 = Math.max(0, Math.floor((TILE_ORGY - y1) / ts)), ty1 = Math.min(n - 1, Math.floor((TILE_ORGY - y0) / ts));
+  const tx0 = Math.max(0, Math.floor((x0 - TILE_ORGX) / bw)), tx1 = Math.min(nb - 1, Math.floor((x1 - TILE_ORGX) / bw));
+  const ty0 = Math.max(0, Math.floor((TILE_ORGY - y1) / bw)), ty1 = Math.min(nb - 1, Math.floor((TILE_ORGY - y0) / bw));
   for (let ty = ty0; ty <= ty1; ty++) {
     for (let tx = tx0; tx <= tx1; tx++) {
       const t = tile(z, tx, ty, want);
       if (!t || !t.ok) continue;
       // Whole-pixel edges, so neighbours meet without hairlines.
-      const p = w2s(TILE_ORGX + tx * ts, TILE_ORGY - ty * ts);
-      const q = w2s(TILE_ORGX + (tx + 1) * ts, TILE_ORGY - (ty + 1) * ts);
+      const p = w2s(TILE_ORGX + tx * bw, TILE_ORGY - ty * bw);
+      const q = w2s(TILE_ORGX + (tx + 1) * bw, TILE_ORGY - (ty + 1) * bw);
       const ax = Math.round(p[0] * dpr) / dpr, ay = Math.round(p[1] * dpr) / dpr;
       const bx = Math.round(q[0] * dpr) / dpr, by = Math.round(q[1] * dpr) / dpr;
       ctx.drawImage(t.img, ax, ay, bx - ax, by - ay);
