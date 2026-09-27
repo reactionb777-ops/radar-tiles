@@ -60,12 +60,12 @@ const st = document.getElementById('st');
 const followBtn = document.getElementById('follow');
 const params = new URLSearchParams(location.search);
 const key = params.get('k') || '';
-// Link from the menu opens this page on GitHub Pages: t = ntfy topic with the
-// current tunnel origin, h = origin at copy time. Opened on the tunnel itself,
+// Link from the menu opens this page on GitHub Pages with only ?k=. The game posts
+// the current tunnel origin to ntfy topic 'cr' + k. Opened on the tunnel itself,
 // the stream is same-origin.
-const topic = params.get('t') || '';
 const onPages = location.hostname.endsWith('github.io');
-let host = params.get('h') || '';
+const topic = onPages && key ? 'cr' + key : '';
+let host = '';
 let W = 1, H = 1, dpr = 1, scale = 0.1, camX = 0, camY = 0, follow = true, haveFix = false;
 let dots = [], me = null, dirty = true;
 function fitScale() {
