@@ -88,25 +88,73 @@ camY = (MAP_MINY + MAP_MAXY) * 0.5;
 scale = fitScale();
 function onMap(x, y) { return x >= MAP_MINX && x <= MAP_MAXX && y >= MAP_MINY && y <= MAP_MAXY; }
 function w2s(x, y) { return [(x - camX) * scale + W * 0.5, (camY - y) * scale + H * 0.5]; }
-function tile(z, x, y, want) {
-  const id = z + '/' + x + '/' + y;
-  let t = tiles.get(id);
-  if (!t && want) {
-    t = { img: new Image(), ok: false, bad: false, used: 0 };
-    t.img.onload = function () { t.ok = true; dirty = true; };
-    t.img.onerror = function () { t.bad = true; };
-    t.img.src = TILE_URL + id + '.webp';
-    tiles.set(id, t);
+// atlas-loader-v1: sixteen original 256px tiles share one lossless image.
+const atlasQueue = [];
+let atlasActive = 0;
+let atlasPumpScheduled = false;
+function scheduleAtlases() {
+  if (atlasPumpScheduled) return;
+  atlasPumpScheduled = true;
+  queueMicrotask(function () { atlasPumpScheduled = false; pumpAtlases(); });
+}
+function pumpAtlases() {
+  for (let i = atlasQueue.length - 1; i >= 0; i--) {
+    const a = atlasQueue[i];
+    if (tiles.get(a.id) !== a || a.used < tileTick - 1) {
+      if (tiles.get(a.id) === a) tiles.delete(a.id);
+      atlasQueue.splice(i, 1);
+    }
   }
-  if (t) t.used = tileTick;
-  return t;
+  atlasQueue.sort(function (a, b) {
+    function score(t) {
+      const span = TILE_WORLD / (1 << t.z);
+      const x = TILE_ORGX + (t.bx * 4 + t.side * 0.5) * span;
+      const y = TILE_ORGY - (t.by * 4 + t.side * 0.5) * span;
+      return (t.z <= TILE_BASEZ ? -1e12 : 0) + (x - camX) ** 2 + (y - camY) ** 2;
+    }
+    return score(a) - score(b);
+  });
+  while (atlasActive < 8 && atlasQueue.length) {
+    const a = atlasQueue.shift();
+    a.state = 'loading'; atlasActive++;
+    let finished = false;
+    function finish(ok) {
+      if (finished) return;
+      finished = true; atlasActive--;
+      a.state = ok ? 'ready' : 'bad';
+      a.retryAt = Date.now() + 2000;
+      dirty = true; scheduleAtlases();
+    }
+    a.img.onload = function () {
+      if (a.img.decode) a.img.decode().then(function () { finish(true); }, function () { finish(true); });
+      else finish(true);
+    };
+    a.img.onerror = function () { finish(false); };
+    a.img.decoding = 'async';
+    a.img.src = TILE_URL + 'atlas-v1/' + a.id + '.webp';
+  }
+}
+function tile(z, x, y, want) {
+  const bx = Math.floor(x / 4), by = Math.floor(y / 4);
+  const id = z + '/' + bx + '/' + by;
+  let a = tiles.get(id);
+  if (!a && want) {
+    a = { id: id, z: z, bx: bx, by: by, side: Math.min(4, 1 << z), img: new Image(), state: 'queued', used: tileTick, retryAt: 0 };
+    tiles.set(id, a); atlasQueue.push(a); scheduleAtlases();
+  }
+  if (!a || (!want && a.state !== 'ready')) return null;
+  a.used = tileTick;
+  if (want && a.state === 'bad' && Date.now() >= a.retryAt) {
+    a.state = 'queued'; atlasQueue.push(a); scheduleAtlases();
+  }
+  return { img: a.img, ok: a.state === 'ready', sx: (x % 4) * 256, sy: (y % 4) * 256 };
 }
 function dropOldTiles() {
-  if (tiles.size < 700) return;
+  if (tiles.size <= 40) return;
   const old = [];
-  tiles.forEach(function (t, id) { if (t.used < tileTick - 2) old.push([t.used, id]); });
+  tiles.forEach(function (a, id) { if (a.used < tileTick - 2 && a.state !== 'loading') old.push([a.used, id]); });
   old.sort(function (a, b) { return a[0] - b[0]; });
-  for (let i = 0; i < old.length && tiles.size > 500; i++) tiles.delete(old[i][1]);
+  for (let i = 0; i < old.length && tiles.size > 32; i++) tiles.delete(old[i][1]);
 }
 // Draws level z over the view. want=false only paints tiles that are already in.
 function drawLevel(z, want) {
@@ -126,7 +174,7 @@ function drawLevel(z, want) {
       const q = w2s(TILE_ORGX + (tx + 1) * bw, TILE_ORGY - (ty + 1) * bw);
       const ax = Math.round(p[0] * dpr) / dpr, ay = Math.round(p[1] * dpr) / dpr;
       const bx = Math.round(q[0] * dpr) / dpr, by = Math.round(q[1] * dpr) / dpr;
-      ctx.drawImage(t.img, ax, ay, bx - ax, by - ay);
+      ctx.drawImage(t.img, t.sx, t.sy, 256, 256, ax, ay, bx - ax, by - ay);
     }
   }
 }
