@@ -88,10 +88,16 @@ camY = (MAP_MINY + MAP_MAXY) * 0.5;
 scale = fitScale();
 function onMap(x, y) { return x >= MAP_MINX && x <= MAP_MAXX && y >= MAP_MINY && y <= MAP_MAXY; }
 function w2s(x, y) { return [(x - camX) * scale + W * 0.5, (camY - y) * scale + H * 0.5]; }
-// atlas-loader-v1: sixteen original 256px tiles share one lossless image.
+// radar-page-v2 / atlas-loader-v2: visible-first loading and an idle neighbour ring.
 const atlasQueue = [];
 let atlasActive = 0;
+let atlasBackgroundActive = 0;
 let atlasPumpScheduled = false;
+let atlasPrefetchScheduled = false;
+let atlasLastPlan = -Infinity;
+const atlasCacheLimit = (navigator.deviceMemory && navigator.deviceMemory <= 4) ||
+  (window.matchMedia && window.matchMedia('(pointer:coarse)').matches) ? 32 : 48;
+function visibleAtlas(a) { return a.visibleTick >= tileTick - 1; }
 function scheduleAtlases() {
   if (atlasPumpScheduled) return;
   atlasPumpScheduled = true;
@@ -100,7 +106,7 @@ function scheduleAtlases() {
 function pumpAtlases() {
   for (let i = atlasQueue.length - 1; i >= 0; i--) {
     const a = atlasQueue[i];
-    if (tiles.get(a.id) !== a || a.used < tileTick - 1) {
+    if (tiles.get(a.id) !== a || (!visibleAtlas(a) && a.prefetchUntil < performance.now())) {
       if (tiles.get(a.id) === a) tiles.delete(a.id);
       atlasQueue.splice(i, 1);
     }
@@ -110,17 +116,21 @@ function pumpAtlases() {
       const span = TILE_WORLD / (1 << t.z);
       const x = TILE_ORGX + (t.bx * 4 + t.side * 0.5) * span;
       const y = TILE_ORGY - (t.by * 4 + t.side * 0.5) * span;
-      return (t.z <= TILE_BASEZ ? -1e12 : 0) + (x - camX) ** 2 + (y - camY) ** 2;
+      return (!visibleAtlas(t) ? 1e14 : t.z <= TILE_BASEZ ? -1e14 : 0) + (x - camX) ** 2 + (y - camY) ** 2;
     }
     return score(a) - score(b);
   });
   while (atlasActive < 8 && atlasQueue.length) {
+    const background = !visibleAtlas(atlasQueue[0]);
+    if (background && (atlasBackgroundActive >= 2 || atlasActive > atlasBackgroundActive)) break;
     const a = atlasQueue.shift();
     a.state = 'loading'; atlasActive++;
+    if (background) atlasBackgroundActive++;
     let finished = false;
     function finish(ok) {
       if (finished) return;
       finished = true; atlasActive--;
+      if (background) atlasBackgroundActive--;
       a.state = ok ? 'ready' : 'bad';
       a.retryAt = Date.now() + 2000;
       dirty = true; scheduleAtlases();
@@ -131,50 +141,143 @@ function pumpAtlases() {
     };
     a.img.onerror = function () { finish(false); };
     a.img.decoding = 'async';
-    a.img.src = TILE_URL + 'atlas-v1/' + a.id + '.webp';
+    a.img.fetchPriority = background ? 'low' : 'high';
+    a.img.src = TILE_URL + 'atlas-v2/' + a.id + '.webp';
   }
 }
-function tile(z, x, y, want) {
-  const bx = Math.floor(x / 4), by = Math.floor(y / 4);
+function atlas(z, bx, by, want, background) {
   const id = z + '/' + bx + '/' + by;
   let a = tiles.get(id);
   if (!a && want) {
-    a = { id: id, z: z, bx: bx, by: by, side: Math.min(4, 1 << z), img: new Image(), state: 'queued', used: tileTick, retryAt: 0 };
+    a = { id: id, z: z, bx: bx, by: by, side: Math.min(4, 1 << z), img: new Image(), state: 'queued', used: performance.now(), visibleTick: -Infinity, prefetchUntil: 0, retryAt: 0 };
     tiles.set(id, a); atlasQueue.push(a); scheduleAtlases();
   }
   if (!a || (!want && a.state !== 'ready')) return null;
-  a.used = tileTick;
+  a.used = performance.now();
+  if (background) a.prefetchUntil = performance.now() + 1500;
+  else a.visibleTick = tileTick;
   if (want && a.state === 'bad' && Date.now() >= a.retryAt) {
     a.state = 'queued'; atlasQueue.push(a); scheduleAtlases();
   }
-  return { img: a.img, ok: a.state === 'ready', sx: (x % 4) * 256, sy: (y % 4) * 256 };
+  return a;
 }
 function dropOldTiles() {
-  if (tiles.size <= 40) return;
+  if (tiles.size <= atlasCacheLimit) return;
   const old = [];
-  tiles.forEach(function (a, id) { if (a.used < tileTick - 2 && a.state !== 'loading') old.push([a.used, id]); });
+  tiles.forEach(function (a, id) { if (!visibleAtlas(a) && a.state !== 'loading') old.push([a.used, id]); });
   old.sort(function (a, b) { return a[0] - b[0]; });
-  for (let i = 0; i < old.length && tiles.size > 32; i++) tiles.delete(old[i][1]);
+  for (let i = 0; i < old.length && tiles.size > atlasCacheLimit - 8; i++) tiles.delete(old[i][1]);
 }
-// Draws level z over the view. want=false only paints tiles that are already in.
+function prefetchNeighbours(z) {
+  if (atlasPrefetchScheduled || performance.now() - atlasLastPlan < 250 ||
+      document.visibilityState === 'hidden' || (navigator.connection && navigator.connection.saveData)) return;
+  atlasPrefetchScheduled = true;
+  const plan = function () {
+    atlasPrefetchScheduled = false; atlasLastPlan = performance.now();
+    const selected = Math.max(0, Math.min(TILE_MAXZ, Math.ceil(Math.log2(scale * dpr * TILE_WORLD / 256))));
+    if (z !== selected || document.visibilityState === 'hidden') return;
+    const span = TILE_WORLD * 4 / (1 << z), count = Math.max(1, (1 << z) / 4);
+    const x0 = Math.max(camX - W * 0.5 / scale, MAP_MINX), x1 = Math.min(camX + W * 0.5 / scale, MAP_MAXX);
+    const y0 = Math.max(camY - H * 0.5 / scale, MAP_MINY), y1 = Math.min(camY + H * 0.5 / scale, MAP_MAXY);
+    if (x0 >= x1 || y0 >= y1) return;
+    const left = Math.max(0, Math.floor((x0 - TILE_ORGX) / span)), right = Math.min(count - 1, Math.floor((x1 - TILE_ORGX) / span));
+    const top = Math.max(0, Math.floor((TILE_ORGY - y1) / span)), bottom = Math.min(count - 1, Math.floor((TILE_ORGY - y0) / span));
+    const near = [];
+    for (let by = Math.max(0, top - 1); by <= Math.min(count - 1, bottom + 1); by++) {
+      for (let bx = Math.max(0, left - 1); bx <= Math.min(count - 1, right + 1); bx++) {
+        if (bx >= left && bx <= right && by >= top && by <= bottom) continue;
+        const dx = TILE_ORGX + (bx + 0.5) * span - camX, dy = TILE_ORGY - (by + 0.5) * span - camY;
+        near.push({ bx: bx, by: by, distance: dx * dx + dy * dy });
+      }
+    }
+    near.sort(function (a, b) { return a.distance - b.distance; });
+    const visibleCount = (right - left + 1) * (bottom - top + 1);
+    let visibleAcrossLevels = 0;
+    tiles.forEach(function (a) { if (visibleAtlas(a)) visibleAcrossLevels++; });
+    const budget = Math.min(16, Math.max(0, atlasCacheLimit - Math.max(visibleCount, visibleAcrossLevels) - 5));
+    for (let i = 0; i < near.length && i < budget; i++) atlas(z, near[i].bx, near[i].by, true, true);
+    scheduleAtlases();
+  };
+  if (window.requestIdleCallback) window.requestIdleCallback(plan, { timeout: 200 });
+  else setTimeout(plan, 50);
+}
+
+// Smooth local pose on the animation clock; packets never move the camera directly.
+const poseSamples = [];
+let poseClockOffset = 0, poseLastStamp = null, poseJustReset = false;
+let renderMe = null;
+function recordMapPose(pose, stamp) {
+  poseJustReset = false;
+  if (!pose || !Number.isFinite(pose.x) || !Number.isFinite(pose.y)) {
+    poseSamples.length = 0; renderMe = null; poseLastStamp = null; return;
+  }
+  const now = performance.now(), last = poseSamples[poseSamples.length - 1];
+  const sourceStamp = Number(stamp);
+  let delta = poseLastStamp === null ? 0 : sourceStamp - poseLastStamp;
+  if (delta < -2147483648) delta += 4294967296;
+  if (!Number.isFinite(delta) || delta <= 0 || delta > 2000) delta = last ? now - last.arrival : 0;
+  if (!last || now - last.arrival > 1000 || Math.hypot(pose.x - last.x, pose.y - last.y) > Math.max(100, delta * 0.2)) {
+    poseSamples.length = 0;
+    poseClockOffset = now;
+    poseSamples.push({ time: 0, arrival: now, x: pose.x, y: pose.y, h: pose.h || 0 });
+    renderMe = { x: pose.x, y: pose.y, h: pose.h || 0 };
+    poseJustReset = true;
+  } else {
+    const time = last.time + delta;
+    poseClockOffset = Math.min(poseClockOffset, now - time);
+    poseSamples.push({ time: time, arrival: now, x: pose.x, y: pose.y, h: pose.h || 0 });
+    if (poseSamples.length > 10) poseSamples.shift();
+  }
+  poseLastStamp = Number.isFinite(sourceStamp) ? sourceStamp : null;
+}
+function advanceMapMotion(now) {
+  if (!poseSamples.length) return;
+  if (!Number.isFinite(now)) now = performance.now();
+  const target = now - poseClockOffset - 75;
+  let a = poseSamples[0], b = a, ratio = 0;
+  for (let i = 1; i < poseSamples.length; i++) {
+    b = poseSamples[i];
+    if (target <= b.time) break;
+    a = b;
+  }
+  if (target < poseSamples[0].time) a = b = poseSamples[0];
+  else if (a === b && poseSamples.length > 1) {
+    a = poseSamples[poseSamples.length - 2]; b = poseSamples[poseSamples.length - 1];
+  }
+  if (b.time > a.time) ratio = Math.max(0, Math.min(target, b.time + 80) - a.time) / (b.time - a.time);
+  const heading = ((b.h - a.h + 540) % 360) - 180;
+  const next = { x: a.x + (b.x - a.x) * ratio, y: a.y + (b.y - a.y) * ratio, h: a.h + heading * Math.min(ratio, 1) };
+  if (!renderMe || Math.abs(next.x - renderMe.x) + Math.abs(next.y - renderMe.y) > 0.0001 || Math.abs(next.h - renderMe.h) > 0.0001) dirty = true;
+  renderMe = next;
+  if (follow && onMap(next.x, next.y)) {
+    if (camX !== next.x || camY !== next.y) dirty = true;
+    camX = next.x; camY = next.y;
+  }
+}
+
+// Draws level z over the view. Whole atlases move as one continuous surface.
 function drawLevel(z, want) {
-  const nb = 1 << z, bw = TILE_WORLD / nb;
+  const count = Math.max(1, (1 << z) / 4), worldSpan = TILE_WORLD * Math.min(4, 1 << z) / (1 << z);
   const hw = W * 0.5 / scale, hh = H * 0.5 / scale;
   const x0 = Math.max(camX - hw, MAP_MINX), x1 = Math.min(camX + hw, MAP_MAXX);
   const y0 = Math.max(camY - hh, MAP_MINY), y1 = Math.min(camY + hh, MAP_MAXY);
   if (x0 >= x1 || y0 >= y1) return;
-  const tx0 = Math.max(0, Math.floor((x0 - TILE_ORGX) / bw)), tx1 = Math.min(nb - 1, Math.floor((x1 - TILE_ORGX) / bw));
-  const ty0 = Math.max(0, Math.floor((TILE_ORGY - y1) / bw)), ty1 = Math.min(nb - 1, Math.floor((TILE_ORGY - y0) / bw));
-  for (let ty = ty0; ty <= ty1; ty++) {
-    for (let tx = tx0; tx <= tx1; tx++) {
-      const t = tile(z, tx, ty, want);
-      if (!t || !t.ok) continue;
-      // Whole-pixel edges, so neighbours meet without hairlines.
-      const p = w2s(TILE_ORGX + tx * bw, TILE_ORGY - ty * bw);
-      const q = w2s(TILE_ORGX + (tx + 1) * bw, TILE_ORGY - (ty + 1) * bw);
-      const ax = Math.round(p[0] * dpr) / dpr, ay = Math.round(p[1] * dpr) / dpr;
-      const bx = Math.round(q[0] * dpr) / dpr, by = Math.round(q[1] * dpr) / dpr;
-      ctx.drawImage(t.img, t.sx, t.sy, 256, 256, ax, ay, bx - ax, by - ay);
+  const left = Math.max(0, Math.floor((x0 - TILE_ORGX) / worldSpan)), right = Math.min(count - 1, Math.floor((x1 - TILE_ORGX) / worldSpan));
+  const top = Math.max(0, Math.floor((TILE_ORGY - y1) / worldSpan)), bottom = Math.min(count - 1, Math.floor((TILE_ORGY - y0) / worldSpan));
+  const size = worldSpan * scale;
+  for (let by = top; by <= bottom; by++) {
+    for (let bx = left; bx <= right; bx++) {
+      const a = atlas(z, bx, by, want, false);
+      if (!a || a.state !== 'ready') continue;
+      const p = w2s(TILE_ORGX + bx * worldSpan, TILE_ORGY - by * worldSpan);
+      // Integer clip edges meet exactly; neighbour gutters let the image inside
+      // move fractionally without gaps, independent edge rounding, or stretching.
+      const left = Math.round(p[0] * dpr) / dpr, top = Math.round(p[1] * dpr) / dpr;
+      const right = Math.round((p[0] + size) * dpr) / dpr, bottom = Math.round((p[1] + size) * dpr) / dpr;
+      const padding = 2 * size / (a.side * 256);
+      ctx.save(); ctx.beginPath(); ctx.rect(left, top, right - left, bottom - top); ctx.clip();
+      ctx.drawImage(a.img, p[0] - padding, p[1] - padding, size + 2 * padding, size + 2 * padding);
+      ctx.restore();
     }
   }
 }
@@ -183,14 +286,17 @@ function drawMap() {
   const z = Math.max(0, Math.min(TILE_MAXZ, Math.ceil(Math.log2(scale * dpr * TILE_WORLD / 256))));
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = 'high';
-  // Coarse base first, then any finer level already cached, then the sharp one.
   const base = Math.min(z, TILE_BASEZ);
   drawLevel(base, true);
   for (let lz = base + 1; lz < z; lz++) drawLevel(lz, false);
   if (z > base) drawLevel(z, true);
   dropOldTiles();
+  prefetchNeighbours(z);
 }
-function draw() {
+
+function draw(now) {
+  advanceMapMotion(now);
+  const me = renderMe;
   if (dirty) {
     dirty = false;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -254,7 +360,7 @@ function draw() {
 function setFollow(on) {
   follow = on;
   followBtn.classList.toggle('on', on);
-  if (on && me && onMap(me.x, me.y)) { camX = me.x; camY = me.y; dirty = true; }
+  if (on && me && onMap(me.x, me.y)) { camX = (renderMe || me).x; camY = (renderMe || me).y; dirty = true; }
 }
 followBtn.onclick = function () { setFollow(!follow); };
 // Players / NPCs / friends: each viewer picks what to see, remembered in this browser.
@@ -313,11 +419,12 @@ function apply(j) {
   document.getElementById('nc').textContent = String(n.length / 3);
   document.getElementById('nf').textContent = String(f.length / 3);
   me = j.ok && j.me ? { x: j.me[0], y: j.me[1], h: j.me[2] } : null;
+  recordMapPose(me, j.t);
   if (me) {
     document.getElementById('xy').textContent = me.x.toFixed(1) + '   ' + me.y.toFixed(1);
     if (onMap(me.x, me.y)) {
       if (!haveFix) { haveFix = true; scale = Math.max(scale, 1); }
-      if (follow) { camX = me.x; camY = me.y; }
+      if (follow && poseJustReset) { camX = me.x; camY = me.y; }
     }
   }
   st.textContent = j.ok ? 'live' : 'waiting';
